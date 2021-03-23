@@ -35,9 +35,8 @@ def test(data,
          save_hybrid=False,  # for hybrid auto-labelling
          save_conf=False,  # save auto-label confidences
          plots=True,
-         wandb_logger=None,
-         compute_loss=None,
-         is_coco=False):
+         log_imgs=0,  # number of logged images
+         compute_loss=None):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -67,19 +66,21 @@ def test(data,
 
     # Configure
     model.eval()
-    if isinstance(data, str):
-        is_coco = data.endswith('coco.yaml')
-        with open(data) as f:
-            data = yaml.load(f, Loader=yaml.SafeLoader)
+    is_coco = data.endswith('coco.yaml')  # is COCO dataset
+    with open(data) as f:
+        data = yaml.load(f, Loader=yaml.SafeLoader)  # model dict
     check_dataset(data)  # check
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
 
     # Logging
-    log_imgs = 0
-    if wandb_logger and wandb_logger.wandb:
-        log_imgs = min(wandb_logger.log_imgs, 100)
+    log_imgs, wandb = min(log_imgs, 100), None  # ceil
+    try:
+        import wandb  # Weights & Biases
+    except ImportError:
+        log_imgs = 0
+
     # Dataloader
     if not training:
         if device.type != 'cpu':
@@ -146,17 +147,15 @@ def test(data,
                     with open(save_dir / 'labels' / (path.stem + '.txt'), 'a') as f:
                         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-            # W&B logging - Media Panel Plots
-            if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:  # Check for test operation
-                if wandb_logger.current_epoch % wandb_logger.bbox_interval == 0:
-                    box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
-                                 "class_id": int(cls),
-                                 "box_caption": "%s %.3f" % (names[cls], conf),
-                                 "scores": {"class_score": conf},
-                                 "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
-                    boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
-                    wandb_images.append(wandb_logger.wandb.Image(img[si], boxes=boxes, caption=path.name))
-                wandb_logger.log_training_progress(predn, path, names)  # logs dsviz tables
+            # W&B logging
+            if plots and len(wandb_images) < log_imgs:
+                box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
+                             "class_id": int(cls),
+                             "box_caption": "%s %.3f" % (names[cls], conf),
+                             "scores": {"class_score": conf},
+                             "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
+                boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
+                wandb_images.append(wandb.Image(img[si], boxes=boxes, caption=path.name))
 
             # Append to pycocotools JSON dictionary
             if save_json:
@@ -240,11 +239,9 @@ def test(data,
     # Plots
     if plots:
         confusion_matrix.plot(save_dir=save_dir, names=list(names.values()))
-        if wandb_logger and wandb_logger.wandb:
-            val_batches = [wandb_logger.wandb.Image(str(f), caption=f.name) for f in sorted(save_dir.glob('test*.jpg'))]
-            wandb_logger.log({"Validation": val_batches})
-    if wandb_images:
-        wandb_logger.log({"Bounding Box Debugger/Images": wandb_images})
+        if wandb and wandb.run:
+            val_batches = [wandb.Image(str(f), caption=f.name) for f in sorted(save_dir.glob('test*.jpg'))]
+            wandb.log({"Images": wandb_images, "Validation": val_batches}, commit=False)
 
     # Save JSON
     if save_json and len(jdict):
